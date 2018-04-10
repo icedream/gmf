@@ -77,11 +77,14 @@ func NewAVIOContext(ctx *FmtCtx, handlers *AVIOHandlers) (*AVIOContext, error) {
 		this.handlerKey = uintptr(unsafe.Pointer(ctx.avCtx))
 	}
 
+	writeFlag := 0
+
 	if handlers.ReadPacket != nil {
 		ptrRead = (*[0]byte)(C.readCallBack)
 	}
 
 	if handlers.WritePacket != nil {
+		writeFlag = 1
 		ptrWrite = (*[0]byte)(C.writeCallBack)
 	}
 
@@ -89,7 +92,12 @@ func NewAVIOContext(ctx *FmtCtx, handlers *AVIOHandlers) (*AVIOContext, error) {
 		ptrSeek = (*[0]byte)(C.seekCallBack)
 	}
 
-	if this.avAVIOContext = C.avio_alloc_context(buffer, C.int(IO_BUFFER_SIZE), 0, unsafe.Pointer(ctx.avCtx), ptrRead, ptrWrite, ptrSeek); this.avAVIOContext == nil {
+	if this.avAVIOContext = C.avio_alloc_context(
+		buffer,
+		C.int(IO_BUFFER_SIZE),
+		C.int(writeFlag),
+		unsafe.Pointer(ctx.avCtx),
+		ptrRead, ptrWrite, ptrSeek); this.avAVIOContext == nil {
 		return nil, errors.New("unable to initialize avio context")
 	}
 

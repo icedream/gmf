@@ -8,6 +8,11 @@ package gmf
 #include "libavutil/mathematics.h"
 #include "libavutil/rational.h"
 #include "libavutil/samplefmt.h"
+#include "libavcodec/avcodec.h"
+
+uint32_t return_int (int num) {
+	return (uint32_t)(num);
+}
 
 */
 import "C"
@@ -15,6 +20,7 @@ import "C"
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"syscall"
 	"unsafe"
 )
@@ -28,6 +34,7 @@ type AVR struct {
 
 const (
 	AVERROR_EOF = -541478725
+	// AV_ROUND_PASS_MINMAX = 8192
 )
 
 var (
@@ -37,6 +44,14 @@ var (
 
 func (this AVR) AVRational() AVRational {
 	return AVRational{C.int(this.Num), C.int(this.Den)}
+}
+
+func (this AVR) String() string {
+	return fmt.Sprintf("%d/%d", this.Num, this.Den)
+}
+
+func (this AVR) Av2qd() float64 {
+	return float64(this.Num) / float64(this.Den)
 }
 
 func (this AVRational) AVR() AVR {
@@ -64,6 +79,10 @@ func RescaleQ(a int64, encBase AVRational, stBase AVRational) int64 {
 	return int64(C.av_rescale_q(C.int64_t(a), C.struct_AVRational(encBase), C.struct_AVRational(stBase)))
 }
 
+func RescaleQRnd(a int64, encBase AVRational, stBase AVRational) int64 {
+	return int64(C.av_rescale_q_rnd(C.int64_t(a), C.struct_AVRational(encBase), C.struct_AVRational(stBase), C.AV_ROUND_NEAR_INF|C.AV_ROUND_PASS_MINMAX))
+}
+
 func CompareTimeStamp(aTimestamp int, aTimebase AVRational, bTimestamp int, bTimebase AVRational) int {
 	return int(C.av_compare_ts(C.int64_t(aTimestamp), C.struct_AVRational(aTimebase),
 		C.int64_t(bTimestamp), C.struct_AVRational(bTimebase)))
@@ -76,8 +95,21 @@ func Rescale(a, b, c int64) int64 {
 	return int64(C.av_rescale(C.int64_t(a), C.int64_t(b), C.int64_t(c)))
 }
 
+func RescaleTs(pkt *Packet, encBase AVRational, stBase AVRational) {
+	C.av_packet_rescale_ts(&pkt.avPacket, C.struct_AVRational(encBase), C.struct_AVRational(stBase))
+}
+
 func GetSampleFmtName(fmt int32) string {
 	return C.GoString(C.av_get_sample_fmt_name(fmt))
+}
+
+// func RescaleRnd(a, b, c int64) int64 {
+// 	return int64(C.av_rescale_rnd(C.int64_t(a), C.int64_t(b), C.int64_t(c), 3))
+// }
+
+func AvInvQ(q AVRational) AVRational {
+	avr := q.AVR()
+	return AVRational{C.int(avr.Den), C.int(avr.Num)}
 }
 
 // Synthetic video generator. It produces 25 iteratable frames.

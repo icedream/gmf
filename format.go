@@ -50,6 +50,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -68,6 +70,17 @@ const (
 	AV_LOG_INFO    int = C.AV_LOG_INFO
 	AV_LOG_VERBOSE int = C.AV_LOG_VERBOSE
 	AV_LOG_DEBUG   int = C.AV_LOG_DEBUG
+)
+
+const (
+	FF_MOV_FLAG_FASTSTART = (1 << 7)
+)
+
+const (
+	PLAYLIST_TYPE_NONE int = iota
+	PLAYLIST_TYPE_EVENT
+	PLAYLIST_TYPE_VOD
+	PLAYLIST_TYPE_NB
 )
 
 type FmtCtx struct {
@@ -91,7 +104,7 @@ func LogSetLevel(level int) {
 
 // @todo return error if avCtx is null
 // @todo start_time is it needed?
-func NewCtx() *FmtCtx {
+func NewCtx(options ...[]Option) *FmtCtx {
 	ctx := &FmtCtx{
 		avCtx:    C.avformat_alloc_context(),
 		streams:  make(map[int]*Stream),
@@ -100,10 +113,16 @@ func NewCtx() *FmtCtx {
 
 	ctx.avCtx.start_time = 0
 
+	if len(options) == 1 {
+		for _, option := range options[0] {
+			option.Set(ctx.avCtx)
+		}
+	}
+
 	return ctx
 }
 
-func NewOutputCtx(i interface{}) (*FmtCtx, error) {
+func NewOutputCtx(i interface{}, options ...[]Option) (*FmtCtx, error) {
 	this := &FmtCtx{streams: make(map[int]*Stream)}
 
 	switch t := i.(type) {
@@ -127,6 +146,14 @@ func NewOutputCtx(i interface{}) (*FmtCtx, error) {
 	C.avformat_alloc_output_context2(&this.avCtx, this.ofmt.avOutputFmt, nil, cfilename)
 	if this.avCtx == nil {
 		return nil, errors.New(fmt.Sprintf("unable to allocate context"))
+	}
+
+	C.av_opt_set_defaults(unsafe.Pointer(this.avCtx))
+
+	if len(options) == 1 {
+		for _, option := range options[0] {
+			option.Set(this.avCtx)
+		}
 	}
 
 	this.Filename = this.ofmt.Filename
@@ -153,7 +180,6 @@ func NewOutputCtxWithFormatName(filename, format string) (*FmtCtx, error) {
 
 	this.ofmt = &OutputFmt{Filename: filename, avOutputFmt: this.avCtx.oformat}
 
-	//	fmt.Println(this.ofmt.Infomation())
 	return this, nil
 }
 
@@ -187,6 +213,12 @@ func NewInputCtxWithFormatName(filename, format string) (*FmtCtx, error) {
 	return ctx, nil
 }
 
+func (this *FmtCtx) SetOptions(options []*Option) {
+	for _, option := range options {
+		option.Set(this.avCtx)
+	}
+}
+
 func (this *FmtCtx) OpenInput(filename string) error {
 	var (
 		cfilename *_Ctype_char
@@ -207,9 +239,6 @@ func (this *FmtCtx) OpenInput(filename string) error {
 	if averr := C.avformat_find_stream_info(this.avCtx, nil); averr < 0 {
 		return errors.New(fmt.Sprintf("Unable to find stream info: %s", AvError(int(averr))))
 	}
-
-	// fmt.Println(this.avCtx.pb)
-	// C.av_opt_set_int(this.avCtx.codec, "refcounted_frames", 1, 0)
 
 	return nil
 }
@@ -308,7 +337,6 @@ func (this *FmtCtx) SetOformat(ofmt *OutputFmt) error {
 }
 
 func (this *FmtCtx) Dump() {
-
 	if this.ofmt == nil {
 		C.av_dump_format(this.avCtx, 0, &(this.avCtx.filename[0]), 0)
 	} else {
@@ -321,17 +349,23 @@ func (this *FmtCtx) DumpAv() {
 	fmt.Println("flags:", this.avCtx.flags)
 }
 
-func (this *FmtCtx) GetNextPacket() *Packet {
+func (this *FmtCtx) GetNextPacket() (*Packet, error) {
 	p := NewPacket()
 	for {
+		ret := int(C.av_read_frame(this.avCtx, &p.avPacket))
 
-		if ret := C.av_read_frame(this.avCtx, &p.avPacket); int(ret) < 0 {
-			Release(p)
-			return nil
+		if AvErrno(ret) == syscall.EAGAIN {
+			time.Sleep(10000 * time.Microsecond)
+			continue
+		}
+		if ret < 0 {
+			return nil, AvError(ret)
 		}
 
-		return p
+		break
 	}
+
+	return p, nil
 }
 
 func (this *FmtCtx) GetNewPackets() chan *Packet {
@@ -352,6 +386,14 @@ func (this *FmtCtx) GetNewPackets() chan *Packet {
 	}()
 
 	return yield
+}
+
+func (this *FmtCtx) GetNewPacket() (*Packet, error) {
+	p := NewPacket()
+
+	ret := int(C.av_read_frame(this.avCtx, &p.avPacket))
+
+	return p, AvError(ret)
 }
 
 func (this *FmtCtx) NewStream(c *Codec) *Stream {
@@ -430,7 +472,15 @@ func (this *FmtCtx) Free() {
 }
 
 func (this *FmtCtx) Duration() int {
-	return int(this.avCtx.duration)
+	us := int(this.avCtx.duration) % AV_TIME_BASE
+	fmt.Printf("us: %v\n", us)
+	fmt.Printf("duration: %v\n", int(this.avCtx.duration))
+	return int(this.avCtx.duration) / AV_TIME_BASE
+}
+
+// Total stream bitrate in bit/s
+func (this *FmtCtx) BitRate() int64 {
+	return int64(this.avCtx.bit_rate)
 }
 
 func (this *FmtCtx) StartTime() int {
@@ -504,6 +554,10 @@ func (this *FmtCtx) WriteSDPFile(filename string) error {
 
 	file.WriteString(this.GetSDPString())
 	return nil
+}
+
+func (this *FmtCtx) Position() int {
+	return int(this.avCtx.pb.pos)
 }
 
 type OutputFmt struct {
